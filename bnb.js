@@ -80,7 +80,7 @@ async function humanMouseMove(page) {
   });
 }
 
-async function moveMouseToElementAndClick(page, elementHandle) {
+async function moveMouseToElementAndClick(page, elementHandle, clickCount = 1) {
   const box = await elementHandle.boundingBox();
 
   if (!box) {
@@ -93,7 +93,10 @@ async function moveMouseToElementAndClick(page, elementHandle) {
 
   await page.mouse.move(targetX, targetY, { steps: random(12, 30) });
   await humanDelay(120, 320);
-  await page.mouse.click(targetX, targetY, { delay: random(40, 140) });
+  await page.mouse.click(targetX, targetY, {
+    delay: random(40, 140),
+    clickCount
+  });
 }
 
 async function humanScroll(page) {
@@ -122,8 +125,8 @@ async function clickGenerateButton(page, timeout = 120000) {
   return clickFirstAvailable(page, GENERATE_BUTTON_SELECTORS, timeout);
 }
 
-async function clickButtonByText(page, patterns) {
-  return page.evaluate((patternSources) => {
+async function clickButtonByText(page, patterns, clickCount = 1) {
+  return page.evaluate((patternSources, clicks) => {
     const regexes = patternSources.map(source => new RegExp(source, "i"));
     const elements = Array.from(document.querySelectorAll('button, [role="menuitem"], [role="button"]'));
 
@@ -140,23 +143,25 @@ async function clickButtonByText(page, patterns) {
       if (!text) continue;
 
       if (regexes.some(regex => regex.test(text))) {
-        el.click();
+        for (let i = 0; i < clicks; i++) {
+          el.click();
+        }
         return text;
       }
     }
 
     return null;
-  }, patterns.map((pattern) => pattern.source));
+  }, patterns.map((pattern) => pattern.source), clickCount);
 }
 
 async function clickDownloadButton(page, timeout = 120000) {
   try {
-    return await clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 5000, true);
+    return await clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 5000, true, 2);
   } catch (_) {
     // fallback to broader text matching
   }
 
-  const clickedByText = await clickButtonByText(page, DOWNLOAD_BUTTON_TEXT_PATTERNS);
+  const clickedByText = await clickButtonByText(page, DOWNLOAD_BUTTON_TEXT_PATTERNS, 2);
   if (clickedByText) {
     return `text-match:${clickedByText}`;
   }
@@ -170,9 +175,9 @@ async function clickDownloadButton(page, timeout = 120000) {
     await humanDelay(250, 700);
 
     try {
-      return await clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 10000, true);
+      return await clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 10000, true, 2);
     } catch (_) {
-      const clickedAfterMenu = await clickButtonByText(page, DOWNLOAD_BUTTON_TEXT_PATTERNS);
+      const clickedAfterMenu = await clickButtonByText(page, DOWNLOAD_BUTTON_TEXT_PATTERNS, 2);
       if (clickedAfterMenu) {
         return `text-match:${clickedAfterMenu}`;
       }
@@ -185,7 +190,7 @@ async function clickDownloadButton(page, timeout = 120000) {
     DOWNLOAD_BUTTON_SELECTORS
   );
 
-  return clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 10000, true);
+  return clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 10000, true, 2);
 }
 
 async function findPromptEditor(page, timeout = 60000) {
@@ -364,14 +369,14 @@ async function waitForGenerationWithHumanLoading(page, sceneMeta, timeout = 6000
   await Promise.all([generationPromise, loadingPromise]);
 }
 
-async function clickFirstAvailable(page, selectors, timeout = 120000, clickWithMouse = false) {
+async function clickFirstAvailable(page, selectors, timeout = 120000, clickWithMouse = false, clickCount = 1) {
   for (const selector of selectors) {
     const button = await page.$(selector);
     if (button) {
       if (clickWithMouse) {
-        await moveMouseToElementAndClick(page, button);
+        await moveMouseToElementAndClick(page, button, clickCount);
       } else {
-        await button.click();
+        await button.click({ clickCount });
       }
       return selector;
     }
@@ -387,9 +392,9 @@ async function clickFirstAvailable(page, selectors, timeout = 120000, clickWithM
     const button = await page.$(selector);
     if (button) {
       if (clickWithMouse) {
-        await moveMouseToElementAndClick(page, button);
+        await moveMouseToElementAndClick(page, button, clickCount);
       } else {
-        await button.click();
+        await button.click({ clickCount });
       }
       return selector;
     }
