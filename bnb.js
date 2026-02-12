@@ -15,10 +15,31 @@ const USER_DATA_DIR = path.resolve("./user_data");
 
 let processedCount = 0;
 
-const GENERATE_BUTTON_SELECTOR = 'svg[width="20"][height="20"]';
+const GENERATE_BUTTON_SELECTORS = [
+  'button[aria-label="Make video"]',
+  'button[aria-label="Create video"]',
+  'button[aria-label="Générer"]',
+  'button[aria-label="Generate"]',
+  'svg[width="20"][height="20"]'
+];
 const DOWNLOAD_BUTTON_SELECTORS = [
   'button[aria-label="Télécharger"]',
-  'button[aria-label="Download"]'
+  'button[aria-label="Download"]',
+  'button[aria-label="Download video"]',
+  'button[aria-label="Télécharger la vidéo"]',
+  '[role="menuitem"][aria-label="Download"]',
+  '[role="menuitem"][aria-label="Download video"]'
+];
+
+const VIDEO_OPTIONS_BUTTON_SELECTORS = [
+  'button[aria-label="Video Options"]',
+  'button[aria-label="Options vidéo"]'
+];
+
+const DOWNLOAD_BUTTON_TEXT_PATTERNS = [
+  /download/i,
+  /télécharger/i,
+  /descargar/i
 ];
 
 const CANCEL_KEYWORDS = [
@@ -30,6 +51,8 @@ const CANCEL_KEYWORDS = [
 const GENERATION_PROGRESS_REGEX = /(\b\d{1,3})%/;
 
 const PROMPT_SELECTORS = [
+  'textarea[aria-label="Make a video"]',
+  'textarea[placeholder="Type to customize video..."]',
   'div.tiptap.ProseMirror[contenteditable="true"]',
   'p[data-placeholder="Type to imagine"]',
   'p[data-placeholder="Tapez pour imaginer"]'
@@ -79,6 +102,76 @@ async function humanTypeInEditor(page, editorHandle, text) {
   }
 }
 
+async function clickGenerateButton(page, timeout = 120000) {
+  return clickFirstAvailable(page, GENERATE_BUTTON_SELECTORS, timeout);
+}
+
+async function clickButtonByText(page, patterns) {
+  return page.evaluate((patternSources) => {
+    const regexes = patternSources.map(source => new RegExp(source, "i"));
+    const elements = Array.from(document.querySelectorAll('button, [role="menuitem"], [role="button"]'));
+
+    const isVisible = (el) => {
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+    };
+
+    for (const el of elements) {
+      if (!isVisible(el) || el.disabled) continue;
+
+      const text = ((el.innerText || el.textContent || "") + " " + (el.getAttribute("aria-label") || "")).trim();
+      if (!text) continue;
+
+      if (regexes.some(regex => regex.test(text))) {
+        el.click();
+        return text;
+      }
+    }
+
+    return null;
+  }, patterns.map((pattern) => pattern.source));
+}
+
+async function clickDownloadButton(page, timeout = 120000) {
+  try {
+    return await clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 5000);
+  } catch (_) {
+    // fallback to broader text matching
+  }
+
+  const clickedByText = await clickButtonByText(page, DOWNLOAD_BUTTON_TEXT_PATTERNS);
+  if (clickedByText) {
+    return `text-match:${clickedByText}`;
+  }
+
+  const hasVideoOptionsButton = await page.evaluate((selectors) => {
+    return selectors.some(selector => !!document.querySelector(selector));
+  }, VIDEO_OPTIONS_BUTTON_SELECTORS);
+
+  if (hasVideoOptionsButton) {
+    await clickFirstAvailable(page, VIDEO_OPTIONS_BUTTON_SELECTORS, 10000);
+    await humanDelay(250, 700);
+
+    try {
+      return await clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 10000);
+    } catch (_) {
+      const clickedAfterMenu = await clickButtonByText(page, DOWNLOAD_BUTTON_TEXT_PATTERNS);
+      if (clickedAfterMenu) {
+        return `text-match:${clickedAfterMenu}`;
+      }
+    }
+  }
+
+  await page.waitForFunction(
+    (selectors) => selectors.some(selector => !!document.querySelector(selector)),
+    { timeout },
+    DOWNLOAD_BUTTON_SELECTORS
+  );
+
+  return clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 10000);
+}
+
 async function findPromptEditor(page, timeout = 60000) {
   const editorHandle = await page.waitForFunction(
     selectors => {
@@ -86,6 +179,10 @@ async function findPromptEditor(page, timeout = 60000) {
         const el = document.querySelector(selector);
 
         if (!el) continue;
+
+        if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") {
+          return el;
+        }
 
         const contentEditable = el.closest('[contenteditable="true"]') ||
           (el.getAttribute && el.getAttribute("contenteditable") === "true" ? el : null);
@@ -387,7 +484,8 @@ async function processScene(page, scene, index, file, attempt) {
       await humanScroll(page);
 
       await humanMouseMove(page);
-      await page.click(GENERATE_BUTTON_SELECTOR);
+      const clickedSelector = await clickGenerateButton(page, 120000);
+      logSceneStage(sceneMeta, "generate-button-clicked", clickedSelector);
     });
 
     console.log("🎬 Generating...");
@@ -407,7 +505,7 @@ async function processScene(page, scene, index, file, attempt) {
 
       await humanDelay(1000, 3000);
       await humanMouseMove(page);
-      const clickedSelector = await clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 120000);
+      const clickedSelector = await clickDownloadButton(page, 120000);
       logSceneStage(sceneMeta, "download-button-clicked", clickedSelector);
     });
 
