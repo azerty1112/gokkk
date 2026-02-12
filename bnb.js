@@ -12,7 +12,6 @@ const SITE_URL = "https://grok.com/imagine";
 const SCRIPT_FOLDER = "./video_scripts";
 const DOWNLOAD_FOLDER = path.resolve("./downloads");
 const USER_DATA_DIR = path.resolve("./user_data");
-const COOKIES_FILE = "./cookies.json";
 
 let processedCount = 0;
 
@@ -120,6 +119,20 @@ async function clearEditor(page, editorHandle) {
   await page.keyboard.press("Backspace");
 }
 
+async function clearEditorForNextScene(page, editorHandle) {
+  await clearEditor(page, editorHandle);
+  await humanDelay(200, 500);
+
+  const isEmpty = await page.evaluate((editor) => {
+    const text = (editor.innerText || editor.textContent || "").replace(/\u200B/g, "").trim();
+    return text.length === 0;
+  }, editorHandle);
+
+  if (!isEmpty) {
+    await clearEditor(page, editorHandle);
+  }
+}
+
 async function captureErrorContext(page, label) {
   const stamp = new Date().toISOString().replace(/[.:]/g, "-");
   const debugDir = path.resolve("./debug");
@@ -201,6 +214,43 @@ async function waitForGenerationCompletion(page, sceneMeta, timeout = 600000) {
   logSceneStage(sceneMeta, "generation-finish-signal", `${elapsed}ms`);
 }
 
+async function waitForGenerationWithHumanLoading(page, sceneMeta, timeout = 600000) {
+  const loadingPhrases = [
+    "🧠 Preparing cinematic details...",
+    "🎞️ Fine-tuning motion and lighting...",
+    "🎬 Almost there, rendering naturally...",
+    "✨ Adding final visual polish..."
+  ];
+
+  const generationPromise = waitForGenerationCompletion(page, sceneMeta, timeout);
+
+  const loadingPromise = (async () => {
+    let step = 0;
+
+    while (true) {
+      const done = await Promise.race([
+        generationPromise.then(() => true).catch(() => true),
+        delay(random(2500, 4500)).then(() => false)
+      ]);
+
+      if (done) break;
+
+      console.log(loadingPhrases[step % loadingPhrases.length]);
+      step++;
+
+      if (Math.random() > 0.45) {
+        await humanMouseMove(page);
+      }
+
+      if (Math.random() > 0.65) {
+        await humanScroll(page);
+      }
+    }
+  })();
+
+  await Promise.all([generationPromise, loadingPromise]);
+}
+
 async function clickFirstAvailable(page, selectors, timeout = 120000) {
   for (const selector of selectors) {
     const button = await page.$(selector);
@@ -275,24 +325,6 @@ function ensureRuntimeFolders() {
 }
 
 /* ============================= */
-/*     حقن كوكيز                */
-/* ============================= */
-
-async function injectCookies(page) {
-  if (fs.existsSync(COOKIES_FILE)) {
-    try {
-      const cookies = JSON.parse(fs.readFileSync(COOKIES_FILE));
-      await page.setCookie(...cookies);
-      await page.reload({ waitUntil: "networkidle2" });
-      console.log("✅ Cookies injected");
-      await delay(5000);
-    } catch (e) {
-      console.log("⚠ Cookie injection failed");
-    }
-  }
-}
-
-/* ============================= */
 /*     فحص تسجيل الدخول         */
 /* ============================= */
 
@@ -342,7 +374,7 @@ async function processScene(page, scene, index, file, attempt) {
       await editorHandle.click({ clickCount: 1 });
       await humanDelay(300, 800);
 
-      await clearEditor(page, editorHandle);
+      await clearEditorForNextScene(page, editorHandle);
       await humanDelay();
     });
 
@@ -361,7 +393,7 @@ async function processScene(page, scene, index, file, attempt) {
     console.log("🎬 Generating...");
 
     await runSceneStage(page, sceneMeta, "wait-generation-finish", async () => {
-      await waitForGenerationCompletion(page, sceneMeta, 600000);
+      await waitForGenerationWithHumanLoading(page, sceneMeta, 600000);
     });
 
     const knownFiles = fs.readdirSync(targetDownloadFolder);
@@ -461,8 +493,6 @@ async function start() {
   while (true) {
     try {
       await page.goto(SITE_URL, { waitUntil: "networkidle2" });
-
-      await injectCookies(page);
       await delay(5000);
 
       const files = fs.readdirSync(SCRIPT_FOLDER).filter(f => f.endsWith(".txt"));
