@@ -253,11 +253,12 @@ async function start() {
   });
 
   const pages = await browser.pages();
-  const page = pages.length ? pages[0] : await browser.newPage();
+  const existingImaginePage = pages.find(p => p.url().startsWith(SITE_URL));
+  const page = existingImaginePage || pages.find(p => p.url() !== "about:blank") || pages[0] || await browser.newPage();
 
-  if (pages.length > 1) {
-    for (let i = 1; i < pages.length; i++) {
-      await pages[i].close();
+  for (const openedPage of pages) {
+    if (openedPage !== page) {
+      await openedPage.close();
     }
   }
 
