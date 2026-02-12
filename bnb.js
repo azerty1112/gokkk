@@ -242,6 +242,27 @@ async function waitForDownload(folder, timeout = 180000) {
   return false;
 }
 
+async function waitForNewDownload(folder, knownFiles = [], timeout = 180000) {
+  const start = Date.now();
+  const knownSet = new Set(knownFiles);
+
+  while (Date.now() - start < timeout) {
+    const files = fs.readdirSync(folder);
+    const downloading = files.find(f => f.endsWith(".crdownload"));
+    const newCompletedFile = files.find(
+      f => !knownSet.has(f) && !f.endsWith(".crdownload")
+    );
+
+    if (newCompletedFile && !downloading) {
+      return newCompletedFile;
+    }
+
+    await delay(2000);
+  }
+
+  return false;
+}
+
 function ensureRuntimeFolders() {
   const folders = [SCRIPT_FOLDER, DOWNLOAD_FOLDER, USER_DATA_DIR];
 
@@ -298,6 +319,13 @@ async function processScene(page, scene, index, file, attempt) {
     attempt
   };
 
+  const fileBaseName = path.parse(file).name;
+  const targetDownloadFolder = path.join(DOWNLOAD_FOLDER, fileBaseName);
+
+  if (!fs.existsSync(targetDownloadFolder)) {
+    fs.mkdirSync(targetDownloadFolder, { recursive: true });
+  }
+
   try {
     await runSceneStage(page, sceneMeta, "auth-check", async () => {
       await ensureLoggedIn(page);
@@ -336,18 +364,36 @@ async function processScene(page, scene, index, file, attempt) {
       await waitForGenerationCompletion(page, sceneMeta, 600000);
     });
 
+    const knownFiles = fs.readdirSync(targetDownloadFolder);
+
     await runSceneStage(page, sceneMeta, "download-video", async () => {
+      const downloadClient = await page.target().createCDPSession();
+      await downloadClient.send("Page.setDownloadBehavior", {
+        behavior: "allow",
+        downloadPath: targetDownloadFolder
+      });
+
       await humanDelay(1000, 3000);
       await humanMouseMove(page);
       const clickedSelector = await clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 120000);
       logSceneStage(sceneMeta, "download-button-clicked", clickedSelector);
     });
 
-    const downloaded = await runSceneStage(page, sceneMeta, "wait-download", async () => {
-      return waitForDownload(DOWNLOAD_FOLDER);
+    const downloadedFile = await runSceneStage(page, sceneMeta, "wait-download", async () => {
+      return waitForNewDownload(targetDownloadFolder, knownFiles);
     });
 
-    if (!downloaded) throw new Error("Download timeout");
+    if (!downloadedFile) throw new Error("Download timeout");
+
+    const sceneFileName = `scene-${String(index + 1).padStart(3, "0")}${path.extname(downloadedFile) || ".mp4"}`;
+    const sourcePath = path.join(targetDownloadFolder, downloadedFile);
+    const destinationPath = path.join(targetDownloadFolder, sceneFileName);
+
+    if (sourcePath !== destinationPath) {
+      fs.renameSync(sourcePath, destinationPath);
+    }
+
+    logSceneStage(sceneMeta, "download-saved", destinationPath);
 
     processedCount++;
 
