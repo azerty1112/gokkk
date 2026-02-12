@@ -418,19 +418,49 @@ async function waitForDownload(folder, timeout = 180000) {
   return false;
 }
 
-async function waitForNewDownload(folder, knownFiles = [], timeout = 180000) {
+function getFolderSnapshot(folder) {
+  const snapshot = new Map();
+  const files = fs.readdirSync(folder);
+
+  for (const file of files) {
+    const fullPath = path.join(folder, file);
+
+    try {
+      const stats = fs.statSync(fullPath);
+      snapshot.set(file, {
+        size: stats.size,
+        mtimeMs: stats.mtimeMs
+      });
+    } catch (_) {
+      // Ignore race condition where file disappears between readdir/stat
+    }
+  }
+
+  return snapshot;
+}
+
+async function waitForNewDownload(folder, knownSnapshot = new Map(), timeout = 180000) {
   const start = Date.now();
-  const knownSet = new Set(knownFiles);
 
   while (Date.now() - start < timeout) {
-    const files = fs.readdirSync(folder);
+    const currentSnapshot = getFolderSnapshot(folder);
+    const files = Array.from(currentSnapshot.keys());
     const downloading = files.find(f => f.endsWith(".crdownload"));
-    const newCompletedFile = files.find(
-      f => !knownSet.has(f) && !f.endsWith(".crdownload")
-    );
 
-    if (newCompletedFile && !downloading) {
-      return newCompletedFile;
+    const newOrUpdatedCompletedFile = files.find((file) => {
+      if (file.endsWith(".crdownload")) return false;
+
+      const prev = knownSnapshot.get(file);
+      const current = currentSnapshot.get(file);
+
+      if (!current) return false;
+      if (!prev) return true;
+
+      return current.size !== prev.size || current.mtimeMs > prev.mtimeMs;
+    });
+
+    if (newOrUpdatedCompletedFile && !downloading) {
+      return newOrUpdatedCompletedFile;
     }
 
     await delay(2000);
@@ -523,7 +553,7 @@ async function processScene(page, scene, index, file, attempt) {
       await waitForGenerationWithHumanLoading(page, sceneMeta, 600000);
     });
 
-    const knownFiles = fs.readdirSync(targetDownloadFolder);
+    const knownSnapshot = getFolderSnapshot(targetDownloadFolder);
 
     await runSceneStage(page, sceneMeta, "download-video", async () => {
       const downloadClient = await page.target().createCDPSession();
@@ -539,7 +569,7 @@ async function processScene(page, scene, index, file, attempt) {
     });
 
     const downloadedFile = await runSceneStage(page, sceneMeta, "wait-download", async () => {
-      return waitForNewDownload(targetDownloadFolder, knownFiles);
+      return waitForNewDownload(targetDownloadFolder, knownSnapshot);
     });
 
     if (!downloadedFile) throw new Error("Download timeout");
