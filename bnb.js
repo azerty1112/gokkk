@@ -626,6 +626,7 @@ async function processScene(page, scene, index, file, attempt) {
         downloadPath: targetDownloadFolder
       });
 
+      await delay(5000);
       await humanDelay(1000, 3000);
       await humanMouseMove(page);
       const clickedSelector = await clickDownloadButton(page, 120000);
