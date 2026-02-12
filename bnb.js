@@ -507,6 +507,34 @@ async function waitForNewDownload(folder, knownSnapshot = new Map(), timeout = 1
   const start = Date.now();
   const validVideoExtensions = new Set([".mp4", ".webm", ".mov", ".mkv", ".m4v"]);
 
+  const hasStableSize = (file, expectedSize, waitMs = 4000) => new Promise((resolve) => {
+    setTimeout(() => {
+      try {
+        const latestStats = fs.statSync(path.join(folder, file));
+        resolve(latestStats.size === expectedSize);
+      } catch (_) {
+        resolve(false);
+      }
+    }, waitMs);
+  });
+
+  const isLikelyVideoBinary = (file) => {
+    try {
+      const fd = fs.openSync(path.join(folder, file), "r");
+      const header = Buffer.alloc(16);
+      fs.readSync(fd, header, 0, header.length, 0);
+      fs.closeSync(fd);
+
+      const hasMp4Brand = header.slice(4, 8).toString("ascii") === "ftyp";
+      const isWebmOrMkv = header[0] === 0x1a && header[1] === 0x45 && header[2] === 0xdf && header[3] === 0xa3;
+      const isRiffContainer = header.slice(0, 4).toString("ascii") === "RIFF";
+
+      return hasMp4Brand || isWebmOrMkv || isRiffContainer;
+    } catch (_) {
+      return false;
+    }
+  };
+
   while (Date.now() - start < timeout) {
     const currentSnapshot = getFolderSnapshot(folder);
     const files = Array.from(currentSnapshot.keys());
@@ -522,7 +550,7 @@ async function waitForNewDownload(folder, knownSnapshot = new Map(), timeout = 1
       const current = currentSnapshot.get(file);
 
       if (!current) return false;
-      if (current.size <= 1024) return false;
+      if (current.size <= 50 * 1024) return false;
       if (!prev) return true;
 
       return current.size !== prev.size || current.mtimeMs > prev.mtimeMs;
@@ -532,6 +560,18 @@ async function waitForNewDownload(folder, knownSnapshot = new Map(), timeout = 1
       const latestVideo = newOrUpdatedCompletedFiles
         .map((file) => ({ file, meta: currentSnapshot.get(file) }))
         .sort((a, b) => b.meta.mtimeMs - a.meta.mtimeMs)[0];
+
+      const stable = await hasStableSize(latestVideo.file, latestVideo.meta.size, 3500);
+      if (!stable) {
+        await delay(1200);
+        continue;
+      }
+
+      if (!isLikelyVideoBinary(latestVideo.file)) {
+        console.log(`⚠ Downloaded file looks invalid/broken, waiting for correct video: ${latestVideo.file}`);
+        await delay(2000);
+        continue;
+      }
 
       return latestVideo.file;
     }
