@@ -16,6 +16,12 @@ const COOKIES_FILE = "./cookies.json";
 
 let processedCount = 0;
 
+const PROMPT_SELECTORS = [
+  'div.tiptap.ProseMirror[contenteditable="true"]',
+  'p[data-placeholder="Type to imagine"]',
+  'p[data-placeholder="Tapez pour imaginer"]'
+];
+
 /* ============================= */
 /*        أدوات بشرية            */
 /* ============================= */
@@ -48,6 +54,68 @@ async function humanType(page, selector, text) {
   for (let char of text) {
     await page.type(selector, char);
     await delay(random(40, 120));
+  }
+}
+
+async function humanTypeInEditor(page, editorHandle, text) {
+  await editorHandle.focus();
+
+  for (let char of text) {
+    await page.keyboard.type(char);
+    await delay(random(40, 120));
+  }
+}
+
+async function findPromptEditor(page, timeout = 60000) {
+  return page.waitForFunction(
+    selectors => {
+      for (const selector of selectors) {
+        const el = document.querySelector(selector);
+
+        if (!el) continue;
+
+        const contentEditable = el.closest('[contenteditable="true"]') ||
+          (el.getAttribute && el.getAttribute("contenteditable") === "true" ? el : null);
+
+        if (contentEditable) {
+          return contentEditable;
+        }
+      }
+
+      return null;
+    },
+    { timeout },
+    PROMPT_SELECTORS
+  );
+}
+
+async function clearEditor(page, editorHandle) {
+  await editorHandle.focus();
+  await page.keyboard.down("Control");
+  await page.keyboard.press("A");
+  await page.keyboard.up("Control");
+  await humanDelay(200, 500);
+  await page.keyboard.press("Backspace");
+}
+
+async function captureErrorContext(page, label) {
+  const stamp = new Date().toISOString().replace(/[.:]/g, "-");
+  const debugDir = path.resolve("./debug");
+
+  if (!fs.existsSync(debugDir)) {
+    fs.mkdirSync(debugDir, { recursive: true });
+  }
+
+  const screenshotPath = path.join(debugDir, `${label}-${stamp}.png`);
+  const htmlPath = path.join(debugDir, `${label}-${stamp}.html`);
+
+  try {
+    await page.screenshot({ path: screenshotPath, fullPage: true });
+    const html = await page.content();
+    fs.writeFileSync(htmlPath, html, "utf-8");
+    console.log(`🧪 Error context saved: ${screenshotPath} | ${htmlPath}`);
+  } catch (captureErr) {
+    console.log(`⚠ Failed to capture error context: ${captureErr.message}`);
   }
 }
 
@@ -108,18 +176,18 @@ async function processScene(page, scene, index) {
   try {
     await ensureLoggedIn(page);
 
-    await page.waitForSelector('p[data-placeholder="Tapez pour imaginer"]', { timeout: 60000 });
+    const editorHandle = await findPromptEditor(page, 60000);
 
     await humanMouseMove(page);
     await humanDelay();
 
-    await page.click('p[data-placeholder="Tapez pour imaginer"]', { clickCount: 3 });
+    await editorHandle.click({ clickCount: 1 });
     await humanDelay(300, 800);
 
-    await page.keyboard.press("Backspace");
+    await clearEditor(page, editorHandle);
     await humanDelay();
 
-    await humanType(page, 'p[data-placeholder="Tapez pour imaginer"]', scene);
+    await humanTypeInEditor(page, editorHandle, scene);
 
     await humanDelay(1500, 4000);
     await humanScroll(page);
@@ -157,6 +225,7 @@ async function processScene(page, scene, index) {
     return true;
 
   } catch (err) {
+    await captureErrorContext(page, `scene-${index + 1}`);
     console.log(`❌ Scene error: ${err.message}`);
     return false;
   }
@@ -183,7 +252,14 @@ async function start() {
     ]
   });
 
-  const page = await browser.newPage();
+  const pages = await browser.pages();
+  const page = pages.length ? pages[0] : await browser.newPage();
+
+  if (pages.length > 1) {
+    for (let i = 1; i < pages.length; i++) {
+      await pages[i].close();
+    }
+  }
 
   await page.evaluateOnNewDocument(() => {
     Object.defineProperty(navigator, 'webdriver', {
