@@ -16,6 +16,20 @@ const COOKIES_FILE = "./cookies.json";
 
 let processedCount = 0;
 
+const GENERATE_BUTTON_SELECTOR = 'svg[width="20"][height="20"]';
+const DOWNLOAD_BUTTON_SELECTORS = [
+  'button[aria-label="Télécharger"]',
+  'button[aria-label="Download"]'
+];
+
+const CANCEL_KEYWORDS = [
+  'Annuler la vidéo',
+  'Cancel video',
+  'Cancelar vídeo'
+];
+
+const GENERATION_PROGRESS_REGEX = /(\b\d{1,3})%/;
+
 const PROMPT_SELECTORS = [
   'div.tiptap.ProseMirror[contenteditable="true"]',
   'p[data-placeholder="Type to imagine"]',
@@ -67,7 +81,7 @@ async function humanTypeInEditor(page, editorHandle, text) {
 }
 
 async function findPromptEditor(page, timeout = 60000) {
-  return page.waitForFunction(
+  const editorHandle = await page.waitForFunction(
     selectors => {
       for (const selector of selectors) {
         const el = document.querySelector(selector);
@@ -87,6 +101,14 @@ async function findPromptEditor(page, timeout = 60000) {
     { timeout },
     PROMPT_SELECTORS
   );
+
+  const element = editorHandle.asElement();
+
+  if (!element) {
+    throw new Error("Prompt editor found but it is not an element handle");
+  }
+
+  return element;
 }
 
 async function clearEditor(page, editorHandle) {
@@ -119,6 +141,92 @@ async function captureErrorContext(page, label) {
   }
 }
 
+function logSceneStage(sceneMeta, stage, details = "") {
+  const prefix = `🧭 [${sceneMeta.file}] Scene ${sceneMeta.sceneNumber} Attempt ${sceneMeta.attempt}`;
+  console.log(`${prefix} | ${stage}${details ? ` | ${details}` : ""}`);
+}
+
+async function runSceneStage(page, sceneMeta, stageName, action) {
+  const startedAt = Date.now();
+  logSceneStage(sceneMeta, `${stageName} - START`);
+
+  try {
+    const result = await action();
+    const elapsed = Date.now() - startedAt;
+    logSceneStage(sceneMeta, `${stageName} - OK`, `${elapsed}ms`);
+    return result;
+  } catch (error) {
+    const elapsed = Date.now() - startedAt;
+    logSceneStage(sceneMeta, `${stageName} - FAIL`, `${elapsed}ms | ${error.message}`);
+    await captureErrorContext(page, `${sceneMeta.file}-scene-${sceneMeta.sceneNumber}-${stageName.replace(/\s+/g, "-").toLowerCase()}`);
+    throw error;
+  }
+}
+
+
+async function waitForGenerationCompletion(page, sceneMeta, timeout = 600000) {
+  const start = Date.now();
+
+  const generationStarted = await page.waitForFunction((keywords, progressPatternSource) => {
+    const text = document.body.innerText || "";
+    const progressPattern = new RegExp(progressPatternSource);
+    const hasCancel = keywords.some(keyword => text.includes(keyword));
+    const hasProgress = progressPattern.test(text);
+
+    return hasCancel || hasProgress;
+  }, { timeout: 60000 }, CANCEL_KEYWORDS, GENERATION_PROGRESS_REGEX.source).catch(() => null);
+
+  if (!generationStarted) {
+    logSceneStage(sceneMeta, "generation-start-signal", "not detected within 60s; falling back to completion checks");
+  } else {
+    logSceneStage(sceneMeta, "generation-start-signal", "detected");
+  }
+
+  await page.waitForFunction((keywords, progressPatternSource, downloadSelectors) => {
+    const text = document.body.innerText || "";
+    const progressPattern = new RegExp(progressPatternSource);
+
+    const hasCancel = keywords.some(keyword => text.includes(keyword));
+    const hasProgress = progressPattern.test(text);
+    const hasDownloadButton = downloadSelectors.some(selector => !!document.querySelector(selector));
+
+    if (hasDownloadButton) {
+      return true;
+    }
+
+    return !hasCancel && !hasProgress;
+  }, { timeout }, CANCEL_KEYWORDS, GENERATION_PROGRESS_REGEX.source, DOWNLOAD_BUTTON_SELECTORS);
+
+  const elapsed = Date.now() - start;
+  logSceneStage(sceneMeta, "generation-finish-signal", `${elapsed}ms`);
+}
+
+async function clickFirstAvailable(page, selectors, timeout = 120000) {
+  for (const selector of selectors) {
+    const button = await page.$(selector);
+    if (button) {
+      await button.click();
+      return selector;
+    }
+  }
+
+  await page.waitForFunction(
+    (buttonSelectors) => buttonSelectors.some(selector => !!document.querySelector(selector)),
+    { timeout },
+    selectors
+  );
+
+  for (const selector of selectors) {
+    const button = await page.$(selector);
+    if (button) {
+      await button.click();
+      return selector;
+    }
+  }
+
+  throw new Error(`No selector matched: ${selectors.join(", ")}`);
+}
+
 /* ============================= */
 /*     تحميل حقيقي              */
 /* ============================= */
@@ -132,6 +240,17 @@ async function waitForDownload(folder, timeout = 180000) {
     await delay(2000);
   }
   return false;
+}
+
+function ensureRuntimeFolders() {
+  const folders = [SCRIPT_FOLDER, DOWNLOAD_FOLDER, USER_DATA_DIR];
+
+  for (const folder of folders) {
+    if (!fs.existsSync(folder)) {
+      fs.mkdirSync(folder, { recursive: true });
+      console.log(`📁 Created missing folder: ${folder}`);
+    }
+  }
 }
 
 /* ============================= */
@@ -172,43 +291,61 @@ async function ensureLoggedIn(page) {
 /*     توليد مشهد               */
 /* ============================= */
 
-async function processScene(page, scene, index) {
+async function processScene(page, scene, index, file, attempt) {
+  const sceneMeta = {
+    file,
+    sceneNumber: index + 1,
+    attempt
+  };
+
   try {
-    await ensureLoggedIn(page);
+    await runSceneStage(page, sceneMeta, "auth-check", async () => {
+      await ensureLoggedIn(page);
+    });
 
-    const editorHandle = await findPromptEditor(page, 60000);
+    const editorHandle = await runSceneStage(page, sceneMeta, "find-editor", async () => {
+      return findPromptEditor(page, 60000);
+    });
 
-    await humanMouseMove(page);
-    await humanDelay();
+    await runSceneStage(page, sceneMeta, "prepare-editor", async () => {
+      await humanMouseMove(page);
+      await humanDelay();
 
-    await editorHandle.click({ clickCount: 1 });
-    await humanDelay(300, 800);
+      await editorHandle.click({ clickCount: 1 });
+      await humanDelay(300, 800);
 
-    await clearEditor(page, editorHandle);
-    await humanDelay();
+      await clearEditor(page, editorHandle);
+      await humanDelay();
+    });
 
-    await humanTypeInEditor(page, editorHandle, scene);
+    await runSceneStage(page, sceneMeta, "type-scene", async () => {
+      await humanTypeInEditor(page, editorHandle, scene);
+    });
 
-    await humanDelay(1500, 4000);
-    await humanScroll(page);
+    await runSceneStage(page, sceneMeta, "trigger-generation", async () => {
+      await humanDelay(1500, 4000);
+      await humanScroll(page);
 
-    await humanMouseMove(page);
-    await page.click('svg[width="20"][height="20"]');
+      await humanMouseMove(page);
+      await page.click(GENERATE_BUTTON_SELECTOR);
+    });
 
     console.log("🎬 Generating...");
 
-    await page.waitForFunction(() => {
-      return !document.body.innerText.includes("Annuler la vidéo");
-    }, { timeout: 600000 });
+    await runSceneStage(page, sceneMeta, "wait-generation-finish", async () => {
+      await waitForGenerationCompletion(page, sceneMeta, 600000);
+    });
 
-    await humanDelay(1000, 3000);
+    await runSceneStage(page, sceneMeta, "download-video", async () => {
+      await humanDelay(1000, 3000);
+      await humanMouseMove(page);
+      const clickedSelector = await clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 120000);
+      logSceneStage(sceneMeta, "download-button-clicked", clickedSelector);
+    });
 
-    await page.waitForSelector('button[aria-label="Télécharger"]', { timeout: 120000 });
-
-    await humanMouseMove(page);
-    await page.click('button[aria-label="Télécharger"]');
-
-    const downloaded = await waitForDownload(DOWNLOAD_FOLDER);
+    const downloaded = await runSceneStage(page, sceneMeta, "wait-download", async () => {
+      return waitForDownload(DOWNLOAD_FOLDER);
+    });
 
     if (!downloaded) throw new Error("Download timeout");
 
@@ -225,7 +362,6 @@ async function processScene(page, scene, index) {
     return true;
 
   } catch (err) {
-    await captureErrorContext(page, `scene-${index + 1}`);
     console.log(`❌ Scene error: ${err.message}`);
     return false;
   }
@@ -236,6 +372,8 @@ async function processScene(page, scene, index) {
 /* ============================= */
 
 async function start() {
+  ensureRuntimeFolders();
+
   const browser = await puppeteer.launch({
     headless: false,
     userDataDir: USER_DATA_DIR,
@@ -283,6 +421,12 @@ async function start() {
 
       const files = fs.readdirSync(SCRIPT_FOLDER).filter(f => f.endsWith(".txt"));
 
+      if (!files.length) {
+        console.log("⚠ No .txt files found in video_scripts. Waiting before next scan...");
+        await delay(10000);
+        continue;
+      }
+
       for (const file of files) {
         const content = fs.readFileSync(path.join(SCRIPT_FOLDER, file), "utf-8");
         const scenes = content.split("-------").map(s => s.trim()).filter(Boolean);
@@ -294,7 +438,7 @@ async function start() {
           let success = false;
 
           while (!success && attempts < 3) {
-            success = await processScene(page, scenes[i], i);
+            success = await processScene(page, scenes[i], i, file, attempts + 1);
             attempts++;
 
             if (!success) {
