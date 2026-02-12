@@ -27,6 +27,7 @@ const DOWNLOAD_BUTTON_SELECTORS = [
   'button[aria-label="Download"]',
   'button[aria-label="Download video"]',
   'button[aria-label="Télécharger la vidéo"]',
+  'svg.lucide-download.size-4',
   '[role="menuitem"][aria-label="Download"]',
   '[role="menuitem"][aria-label="Download video"]'
 ];
@@ -132,6 +133,23 @@ async function clickElementWithFallback(page, elementHandle, clickCount = 1) {
   } catch (_) {
     await elementHandle.click({ clickCount, delay: random(40, 120) });
   }
+}
+
+async function resolveClickableHandle(page, elementHandle) {
+  const clickableHandle = await page.evaluateHandle((el) => {
+    if (!el || !el.isConnected) return null;
+
+    const directClickable = el.matches?.("button, a, [role='button'], [role='menuitem']") ? el : null;
+    return directClickable || el.closest("button, a, [role='button'], [role='menuitem']") || el;
+  }, elementHandle);
+
+  const clickableElement = clickableHandle.asElement();
+
+  if (clickableElement) {
+    return clickableElement;
+  }
+
+  return elementHandle;
 }
 
 async function findFirstInteractableBySelector(page, selector) {
@@ -435,10 +453,12 @@ async function clickFirstAvailable(page, selectors, timeout = 120000, clickWithM
     const button = await findFirstInteractableBySelector(page, selector);
     if (!button) continue;
 
+    const clickableTarget = await resolveClickableHandle(page, button);
+
     if (clickWithMouse) {
-      await clickElementWithFallback(page, button, clickCount);
+      await clickElementWithFallback(page, clickableTarget, clickCount);
     } else {
-      await button.click({ clickCount, delay: random(30, 100) });
+      await clickableTarget.click({ clickCount, delay: random(30, 100) });
     }
 
     return selector;
@@ -454,10 +474,12 @@ async function clickFirstAvailable(page, selectors, timeout = 120000, clickWithM
     const button = await findFirstInteractableBySelector(page, selector);
     if (!button) continue;
 
+    const clickableTarget = await resolveClickableHandle(page, button);
+
     if (clickWithMouse) {
-      await clickElementWithFallback(page, button, clickCount);
+      await clickElementWithFallback(page, clickableTarget, clickCount);
     } else {
-      await button.click({ clickCount, delay: random(30, 100) });
+      await clickableTarget.click({ clickCount, delay: random(30, 100) });
     }
 
     return selector;
