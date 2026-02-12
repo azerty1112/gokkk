@@ -173,33 +173,32 @@ async function clickGenerateButton(page, timeout = 120000) {
   return clickFirstAvailable(page, GENERATE_BUTTON_SELECTORS, timeout);
 }
 
-async function clickButtonByText(page, patterns, clickCount = 1) {
-  return page.evaluate((patternSources, clicks) => {
-    const regexes = patternSources.map(source => new RegExp(source, "i"));
-    const elements = Array.from(document.querySelectorAll('button, [role="menuitem"], [role="button"]'));
+async function findInteractableByText(page, patterns) {
+  const allCandidates = await page.$$('button, [role="menuitem"], [role="button"]');
 
-    const isVisible = (el) => {
-      const style = window.getComputedStyle(el);
-      const rect = el.getBoundingClientRect();
-      return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
-    };
+  for (const elementHandle of allCandidates) {
+    const interactable = await isElementInteractable(page, elementHandle);
+    if (!interactable) continue;
 
-    for (const el of elements) {
-      if (!isVisible(el) || el.disabled) continue;
+    const text = await page.evaluate((el) => {
+      return ((el.innerText || el.textContent || "") + " " + (el.getAttribute("aria-label") || "")).trim();
+    }, elementHandle);
 
-      const text = ((el.innerText || el.textContent || "") + " " + (el.getAttribute("aria-label") || "")).trim();
-      if (!text) continue;
-
-      if (regexes.some(regex => regex.test(text))) {
-        for (let i = 0; i < clicks; i++) {
-          el.click();
-        }
-        return text;
-      }
+    if (!text) continue;
+    if (patterns.some((pattern) => pattern.test(text))) {
+      return { elementHandle, text };
     }
+  }
 
-    return null;
-  }, patterns.map((pattern) => pattern.source), clickCount);
+  return null;
+}
+
+async function clickButtonByText(page, patterns, clickCount = 1) {
+  const found = await findInteractableByText(page, patterns);
+  if (!found) return null;
+
+  await clickElementWithFallback(page, found.elementHandle, clickCount);
+  return found.text;
 }
 
 async function clickDownloadButton(page, timeout = 120000) {
