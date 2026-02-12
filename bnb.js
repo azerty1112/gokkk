@@ -99,6 +99,54 @@ async function moveMouseToElementAndClick(page, elementHandle, clickCount = 1) {
   });
 }
 
+async function isElementInteractable(page, elementHandle) {
+  try {
+    return await page.evaluate((el) => {
+      if (!el || !el.isConnected) return false;
+
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      const isDisabled = el.disabled || el.getAttribute("aria-disabled") === "true";
+
+      if (isDisabled) return false;
+      if (style.visibility === "hidden" || style.display === "none") return false;
+      if (style.pointerEvents === "none" || Number(style.opacity) === 0) return false;
+      if (rect.width <= 0 || rect.height <= 0) return false;
+
+      return true;
+    }, elementHandle);
+  } catch (_) {
+    return false;
+  }
+}
+
+async function clickElementWithFallback(page, elementHandle, clickCount = 1) {
+  await page.evaluate((el) => {
+    el.scrollIntoView({ behavior: "auto", block: "center", inline: "center" });
+  }, elementHandle);
+
+  await humanDelay(100, 280);
+
+  try {
+    await moveMouseToElementAndClick(page, elementHandle, clickCount);
+  } catch (_) {
+    await elementHandle.click({ clickCount, delay: random(40, 120) });
+  }
+}
+
+async function findFirstInteractableBySelector(page, selector) {
+  const elements = await page.$$(selector);
+
+  for (const elementHandle of elements) {
+    const interactable = await isElementInteractable(page, elementHandle);
+    if (interactable) {
+      return elementHandle;
+    }
+  }
+
+  return null;
+}
+
 async function humanScroll(page) {
   await page.evaluate(() => {
     window.scrollBy(0, Math.floor(Math.random() * 400));
@@ -155,32 +203,46 @@ async function clickButtonByText(page, patterns, clickCount = 1) {
 }
 
 async function clickDownloadButton(page, timeout = 120000) {
-  try {
-    return await clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 5000, true, 2);
-  } catch (_) {
-    // fallback to broader text matching
-  }
+  const startedAt = Date.now();
+  const maxAttempts = 4;
 
-  const clickedByText = await clickButtonByText(page, DOWNLOAD_BUTTON_TEXT_PATTERNS, 2);
-  if (clickedByText) {
-    return `text-match:${clickedByText}`;
-  }
-
-  const hasVideoOptionsButton = await page.evaluate((selectors) => {
-    return selectors.some(selector => !!document.querySelector(selector));
-  }, VIDEO_OPTIONS_BUTTON_SELECTORS);
-
-  if (hasVideoOptionsButton) {
-    await clickFirstAvailable(page, VIDEO_OPTIONS_BUTTON_SELECTORS, 10000, true);
-    await humanDelay(250, 700);
-
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      return await clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 10000, true, 2);
+      return await clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 3000, true, 2);
     } catch (_) {
-      const clickedAfterMenu = await clickButtonByText(page, DOWNLOAD_BUTTON_TEXT_PATTERNS, 2);
-      if (clickedAfterMenu) {
-        return `text-match:${clickedAfterMenu}`;
+      // keep retrying with broader strategies below
+    }
+
+    const clickedByText = await clickButtonByText(page, DOWNLOAD_BUTTON_TEXT_PATTERNS, 2);
+    if (clickedByText) {
+      return `text-match:${clickedByText}`;
+    }
+
+    const hasVideoOptionsButton = await page.evaluate((selectors) => {
+      return selectors.some(selector => !!document.querySelector(selector));
+    }, VIDEO_OPTIONS_BUTTON_SELECTORS);
+
+    if (hasVideoOptionsButton) {
+      try {
+        await clickFirstAvailable(page, VIDEO_OPTIONS_BUTTON_SELECTORS, 10000, true);
+        await humanDelay(250, 700);
+
+        return await clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 10000, true, 2);
+      } catch (_) {
+        const clickedAfterMenu = await clickButtonByText(page, DOWNLOAD_BUTTON_TEXT_PATTERNS, 2);
+        if (clickedAfterMenu) {
+          return `text-match:${clickedAfterMenu}`;
+        }
       }
+    }
+
+    if (Date.now() - startedAt > timeout) {
+      break;
+    }
+
+    await humanDelay(450, 1200);
+    if (Math.random() > 0.4) {
+      await humanScroll(page);
     }
   }
 
@@ -371,15 +433,16 @@ async function waitForGenerationWithHumanLoading(page, sceneMeta, timeout = 6000
 
 async function clickFirstAvailable(page, selectors, timeout = 120000, clickWithMouse = false, clickCount = 1) {
   for (const selector of selectors) {
-    const button = await page.$(selector);
-    if (button) {
-      if (clickWithMouse) {
-        await moveMouseToElementAndClick(page, button, clickCount);
-      } else {
-        await button.click({ clickCount });
-      }
-      return selector;
+    const button = await findFirstInteractableBySelector(page, selector);
+    if (!button) continue;
+
+    if (clickWithMouse) {
+      await clickElementWithFallback(page, button, clickCount);
+    } else {
+      await button.click({ clickCount, delay: random(30, 100) });
     }
+
+    return selector;
   }
 
   await page.waitForFunction(
@@ -389,15 +452,16 @@ async function clickFirstAvailable(page, selectors, timeout = 120000, clickWithM
   );
 
   for (const selector of selectors) {
-    const button = await page.$(selector);
-    if (button) {
-      if (clickWithMouse) {
-        await moveMouseToElementAndClick(page, button, clickCount);
-      } else {
-        await button.click({ clickCount });
-      }
-      return selector;
+    const button = await findFirstInteractableBySelector(page, selector);
+    if (!button) continue;
+
+    if (clickWithMouse) {
+      await clickElementWithFallback(page, button, clickCount);
+    } else {
+      await button.click({ clickCount, delay: random(30, 100) });
     }
+
+    return selector;
   }
 
   throw new Error(`No selector matched: ${selectors.join(", ")}`);
