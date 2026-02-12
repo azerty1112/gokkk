@@ -80,6 +80,22 @@ async function humanMouseMove(page) {
   });
 }
 
+async function moveMouseToElementAndClick(page, elementHandle) {
+  const box = await elementHandle.boundingBox();
+
+  if (!box) {
+    await elementHandle.click();
+    return;
+  }
+
+  const targetX = box.x + box.width / 2 + random(-4, 4);
+  const targetY = box.y + box.height / 2 + random(-4, 4);
+
+  await page.mouse.move(targetX, targetY, { steps: random(12, 30) });
+  await humanDelay(120, 320);
+  await page.mouse.click(targetX, targetY, { delay: random(40, 140) });
+}
+
 async function humanScroll(page) {
   await page.evaluate(() => {
     window.scrollBy(0, Math.floor(Math.random() * 400));
@@ -135,7 +151,7 @@ async function clickButtonByText(page, patterns) {
 
 async function clickDownloadButton(page, timeout = 120000) {
   try {
-    return await clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 5000);
+    return await clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 5000, true);
   } catch (_) {
     // fallback to broader text matching
   }
@@ -150,11 +166,11 @@ async function clickDownloadButton(page, timeout = 120000) {
   }, VIDEO_OPTIONS_BUTTON_SELECTORS);
 
   if (hasVideoOptionsButton) {
-    await clickFirstAvailable(page, VIDEO_OPTIONS_BUTTON_SELECTORS, 10000);
+    await clickFirstAvailable(page, VIDEO_OPTIONS_BUTTON_SELECTORS, 10000, true);
     await humanDelay(250, 700);
 
     try {
-      return await clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 10000);
+      return await clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 10000, true);
     } catch (_) {
       const clickedAfterMenu = await clickButtonByText(page, DOWNLOAD_BUTTON_TEXT_PATTERNS);
       if (clickedAfterMenu) {
@@ -169,7 +185,7 @@ async function clickDownloadButton(page, timeout = 120000) {
     DOWNLOAD_BUTTON_SELECTORS
   );
 
-  return clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 10000);
+  return clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 10000, true);
 }
 
 async function findPromptEditor(page, timeout = 60000) {
@@ -348,11 +364,15 @@ async function waitForGenerationWithHumanLoading(page, sceneMeta, timeout = 6000
   await Promise.all([generationPromise, loadingPromise]);
 }
 
-async function clickFirstAvailable(page, selectors, timeout = 120000) {
+async function clickFirstAvailable(page, selectors, timeout = 120000, clickWithMouse = false) {
   for (const selector of selectors) {
     const button = await page.$(selector);
     if (button) {
-      await button.click();
+      if (clickWithMouse) {
+        await moveMouseToElementAndClick(page, button);
+      } else {
+        await button.click();
+      }
       return selector;
     }
   }
@@ -366,7 +386,11 @@ async function clickFirstAvailable(page, selectors, timeout = 120000) {
   for (const selector of selectors) {
     const button = await page.$(selector);
     if (button) {
-      await button.click();
+      if (clickWithMouse) {
+        await moveMouseToElementAndClick(page, button);
+      } else {
+        await button.click();
+      }
       return selector;
     }
   }
