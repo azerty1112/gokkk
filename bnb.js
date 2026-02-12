@@ -208,12 +208,12 @@ async function clickDownloadButton(page, timeout = 120000) {
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      return await clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 3000, true, 2);
+      return await clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 3000, true, 1);
     } catch (_) {
       // keep retrying with broader strategies below
     }
 
-    const clickedByText = await clickButtonByText(page, DOWNLOAD_BUTTON_TEXT_PATTERNS, 2);
+    const clickedByText = await clickButtonByText(page, DOWNLOAD_BUTTON_TEXT_PATTERNS, 1);
     if (clickedByText) {
       return `text-match:${clickedByText}`;
     }
@@ -227,9 +227,9 @@ async function clickDownloadButton(page, timeout = 120000) {
         await clickFirstAvailable(page, VIDEO_OPTIONS_BUTTON_SELECTORS, 10000, true);
         await humanDelay(250, 700);
 
-        return await clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 10000, true, 2);
+        return await clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 10000, true, 1);
       } catch (_) {
-        const clickedAfterMenu = await clickButtonByText(page, DOWNLOAD_BUTTON_TEXT_PATTERNS, 2);
+        const clickedAfterMenu = await clickButtonByText(page, DOWNLOAD_BUTTON_TEXT_PATTERNS, 1);
         if (clickedAfterMenu) {
           return `text-match:${clickedAfterMenu}`;
         }
@@ -252,7 +252,7 @@ async function clickDownloadButton(page, timeout = 120000) {
     DOWNLOAD_BUTTON_SELECTORS
   );
 
-  return clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 10000, true, 2);
+  return clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 10000, true, 1);
 }
 
 async function findPromptEditor(page, timeout = 60000) {
@@ -505,26 +505,35 @@ function getFolderSnapshot(folder) {
 
 async function waitForNewDownload(folder, knownSnapshot = new Map(), timeout = 180000) {
   const start = Date.now();
+  const validVideoExtensions = new Set([".mp4", ".webm", ".mov", ".mkv", ".m4v"]);
 
   while (Date.now() - start < timeout) {
     const currentSnapshot = getFolderSnapshot(folder);
     const files = Array.from(currentSnapshot.keys());
     const downloading = files.find(f => f.endsWith(".crdownload"));
 
-    const newOrUpdatedCompletedFile = files.find((file) => {
+    const newOrUpdatedCompletedFiles = files.filter((file) => {
       if (file.endsWith(".crdownload")) return false;
+
+      const ext = path.extname(file).toLowerCase();
+      if (!validVideoExtensions.has(ext)) return false;
 
       const prev = knownSnapshot.get(file);
       const current = currentSnapshot.get(file);
 
       if (!current) return false;
+      if (current.size <= 1024) return false;
       if (!prev) return true;
 
       return current.size !== prev.size || current.mtimeMs > prev.mtimeMs;
     });
 
-    if (newOrUpdatedCompletedFile && !downloading) {
-      return newOrUpdatedCompletedFile;
+    if (newOrUpdatedCompletedFiles.length && !downloading) {
+      const latestVideo = newOrUpdatedCompletedFiles
+        .map((file) => ({ file, meta: currentSnapshot.get(file) }))
+        .sort((a, b) => b.meta.mtimeMs - a.meta.mtimeMs)[0];
+
+      return latestVideo.file;
     }
 
     await delay(2000);
