@@ -27,6 +27,7 @@ const DOWNLOAD_BUTTON_SELECTORS = [
   'button[aria-label="Download"]',
   'button[aria-label="Download video"]',
   'button[aria-label="Télécharger la vidéo"]',
+  'svg.lucide-download.size-4',
   '[role="menuitem"][aria-label="Download"]',
   '[role="menuitem"][aria-label="Download video"]'
 ];
@@ -134,6 +135,23 @@ async function clickElementWithFallback(page, elementHandle, clickCount = 1) {
   }
 }
 
+async function resolveClickableHandle(page, elementHandle) {
+  const clickableHandle = await page.evaluateHandle((el) => {
+    if (!el || !el.isConnected) return null;
+
+    const directClickable = el.matches?.("button, a, [role='button'], [role='menuitem']") ? el : null;
+    return directClickable || el.closest("button, a, [role='button'], [role='menuitem']") || el;
+  }, elementHandle);
+
+  const clickableElement = clickableHandle.asElement();
+
+  if (clickableElement) {
+    return clickableElement;
+  }
+
+  return elementHandle;
+}
+
 async function findFirstInteractableBySelector(page, selector) {
   const elements = await page.$$(selector);
 
@@ -173,33 +191,32 @@ async function clickGenerateButton(page, timeout = 120000) {
   return clickFirstAvailable(page, GENERATE_BUTTON_SELECTORS, timeout);
 }
 
-async function clickButtonByText(page, patterns, clickCount = 1) {
-  return page.evaluate((patternSources, clicks) => {
-    const regexes = patternSources.map(source => new RegExp(source, "i"));
-    const elements = Array.from(document.querySelectorAll('button, [role="menuitem"], [role="button"]'));
+async function findInteractableByText(page, patterns) {
+  const allCandidates = await page.$$('button, [role="menuitem"], [role="button"]');
 
-    const isVisible = (el) => {
-      const style = window.getComputedStyle(el);
-      const rect = el.getBoundingClientRect();
-      return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
-    };
+  for (const elementHandle of allCandidates) {
+    const interactable = await isElementInteractable(page, elementHandle);
+    if (!interactable) continue;
 
-    for (const el of elements) {
-      if (!isVisible(el) || el.disabled) continue;
+    const text = await page.evaluate((el) => {
+      return ((el.innerText || el.textContent || "") + " " + (el.getAttribute("aria-label") || "")).trim();
+    }, elementHandle);
 
-      const text = ((el.innerText || el.textContent || "") + " " + (el.getAttribute("aria-label") || "")).trim();
-      if (!text) continue;
-
-      if (regexes.some(regex => regex.test(text))) {
-        for (let i = 0; i < clicks; i++) {
-          el.click();
-        }
-        return text;
-      }
+    if (!text) continue;
+    if (patterns.some((pattern) => pattern.test(text))) {
+      return { elementHandle, text };
     }
+  }
 
-    return null;
-  }, patterns.map((pattern) => pattern.source), clickCount);
+  return null;
+}
+
+async function clickButtonByText(page, patterns, clickCount = 1) {
+  const found = await findInteractableByText(page, patterns);
+  if (!found) return null;
+
+  await clickElementWithFallback(page, found.elementHandle, clickCount);
+  return found.text;
 }
 
 async function clickDownloadButton(page, timeout = 120000) {
@@ -208,12 +225,12 @@ async function clickDownloadButton(page, timeout = 120000) {
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      return await clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 3000, true, 2);
+      return await clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 3000, true, 1);
     } catch (_) {
       // keep retrying with broader strategies below
     }
 
-    const clickedByText = await clickButtonByText(page, DOWNLOAD_BUTTON_TEXT_PATTERNS, 2);
+    const clickedByText = await clickButtonByText(page, DOWNLOAD_BUTTON_TEXT_PATTERNS, 1);
     if (clickedByText) {
       return `text-match:${clickedByText}`;
     }
@@ -227,9 +244,9 @@ async function clickDownloadButton(page, timeout = 120000) {
         await clickFirstAvailable(page, VIDEO_OPTIONS_BUTTON_SELECTORS, 10000, true);
         await humanDelay(250, 700);
 
-        return await clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 10000, true, 2);
+        return await clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 10000, true, 1);
       } catch (_) {
-        const clickedAfterMenu = await clickButtonByText(page, DOWNLOAD_BUTTON_TEXT_PATTERNS, 2);
+        const clickedAfterMenu = await clickButtonByText(page, DOWNLOAD_BUTTON_TEXT_PATTERNS, 1);
         if (clickedAfterMenu) {
           return `text-match:${clickedAfterMenu}`;
         }
@@ -252,7 +269,7 @@ async function clickDownloadButton(page, timeout = 120000) {
     DOWNLOAD_BUTTON_SELECTORS
   );
 
-  return clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 10000, true, 2);
+  return clickFirstAvailable(page, DOWNLOAD_BUTTON_SELECTORS, 10000, true, 1);
 }
 
 async function findPromptEditor(page, timeout = 60000) {
@@ -436,10 +453,12 @@ async function clickFirstAvailable(page, selectors, timeout = 120000, clickWithM
     const button = await findFirstInteractableBySelector(page, selector);
     if (!button) continue;
 
+    const clickableTarget = await resolveClickableHandle(page, button);
+
     if (clickWithMouse) {
-      await clickElementWithFallback(page, button, clickCount);
+      await clickElementWithFallback(page, clickableTarget, clickCount);
     } else {
-      await button.click({ clickCount, delay: random(30, 100) });
+      await clickableTarget.click({ clickCount, delay: random(30, 100) });
     }
 
     return selector;
@@ -455,10 +474,12 @@ async function clickFirstAvailable(page, selectors, timeout = 120000, clickWithM
     const button = await findFirstInteractableBySelector(page, selector);
     if (!button) continue;
 
+    const clickableTarget = await resolveClickableHandle(page, button);
+
     if (clickWithMouse) {
-      await clickElementWithFallback(page, button, clickCount);
+      await clickElementWithFallback(page, clickableTarget, clickCount);
     } else {
-      await button.click({ clickCount, delay: random(30, 100) });
+      await clickableTarget.click({ clickCount, delay: random(30, 100) });
     }
 
     return selector;
@@ -505,26 +526,75 @@ function getFolderSnapshot(folder) {
 
 async function waitForNewDownload(folder, knownSnapshot = new Map(), timeout = 180000) {
   const start = Date.now();
+  const validVideoExtensions = new Set([".mp4", ".webm", ".mov", ".mkv", ".m4v"]);
+
+  const hasStableSize = (file, expectedSize, waitMs = 4000) => new Promise((resolve) => {
+    setTimeout(() => {
+      try {
+        const latestStats = fs.statSync(path.join(folder, file));
+        resolve(latestStats.size === expectedSize);
+      } catch (_) {
+        resolve(false);
+      }
+    }, waitMs);
+  });
+
+  const isLikelyVideoBinary = (file) => {
+    try {
+      const fd = fs.openSync(path.join(folder, file), "r");
+      const header = Buffer.alloc(16);
+      fs.readSync(fd, header, 0, header.length, 0);
+      fs.closeSync(fd);
+
+      const hasMp4Brand = header.slice(4, 8).toString("ascii") === "ftyp";
+      const isWebmOrMkv = header[0] === 0x1a && header[1] === 0x45 && header[2] === 0xdf && header[3] === 0xa3;
+      const isRiffContainer = header.slice(0, 4).toString("ascii") === "RIFF";
+
+      return hasMp4Brand || isWebmOrMkv || isRiffContainer;
+    } catch (_) {
+      return false;
+    }
+  };
 
   while (Date.now() - start < timeout) {
     const currentSnapshot = getFolderSnapshot(folder);
     const files = Array.from(currentSnapshot.keys());
     const downloading = files.find(f => f.endsWith(".crdownload"));
 
-    const newOrUpdatedCompletedFile = files.find((file) => {
+    const newOrUpdatedCompletedFiles = files.filter((file) => {
       if (file.endsWith(".crdownload")) return false;
+
+      const ext = path.extname(file).toLowerCase();
+      if (!validVideoExtensions.has(ext)) return false;
 
       const prev = knownSnapshot.get(file);
       const current = currentSnapshot.get(file);
 
       if (!current) return false;
+      if (current.size <= 50 * 1024) return false;
       if (!prev) return true;
 
       return current.size !== prev.size || current.mtimeMs > prev.mtimeMs;
     });
 
-    if (newOrUpdatedCompletedFile && !downloading) {
-      return newOrUpdatedCompletedFile;
+    if (newOrUpdatedCompletedFiles.length && !downloading) {
+      const latestVideo = newOrUpdatedCompletedFiles
+        .map((file) => ({ file, meta: currentSnapshot.get(file) }))
+        .sort((a, b) => b.meta.mtimeMs - a.meta.mtimeMs)[0];
+
+      const stable = await hasStableSize(latestVideo.file, latestVideo.meta.size, 3500);
+      if (!stable) {
+        await delay(1200);
+        continue;
+      }
+
+      if (!isLikelyVideoBinary(latestVideo.file)) {
+        console.log(`⚠ Downloaded file looks invalid/broken, waiting for correct video: ${latestVideo.file}`);
+        await delay(2000);
+        continue;
+      }
+
+      return latestVideo.file;
     }
 
     await delay(2000);
